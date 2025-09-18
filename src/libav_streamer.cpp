@@ -8,6 +8,7 @@
 namespace web_video_server
 {
 
+#if ( LIBAVCODEC_VERSION_INT  < AV_VERSION_INT(58,9,100) )
 static int ffmpeg_boost_mutex_lock_manager(void **mutex, enum AVLockOp op)
 {
   if (NULL == mutex)
@@ -47,6 +48,7 @@ static int ffmpeg_boost_mutex_lock_manager(void **mutex, enum AVLockOp op)
   }
   return 0;
 }
+#endif
 
 LibavStreamer::LibavStreamer(const async_web_server_cpp::HttpRequest &request,
                              async_web_server_cpp::HttpConnectionPtr connection, ros::NodeHandle& nh,
@@ -110,24 +112,15 @@ static int dispatch_output_packet(void* opaque, uint8_t* buffer, int buffer_size
 
 void LibavStreamer::initialize(const cv::Mat &img)
 {
-  // Load format
-  format_context_ = avformat_alloc_context();
-  if (!format_context_)
+  // Load format (allocate output context using format name)
+  if (avformat_alloc_output_context2(&format_context_, NULL, format_name_.c_str(), NULL) < 0 || !format_context_)
   {
     async_web_server_cpp::HttpReply::stock_reply(async_web_server_cpp::HttpReply::internal_server_error)(request_,
                                                                                                          connection_,
                                                                                                          NULL, NULL);
-    throw std::runtime_error("Error allocating ffmpeg format context");
+    throw std::runtime_error("Error allocating ffmpeg output format context");
   }
-  output_format_ = av_guess_format(format_name_.c_str(), NULL, NULL);
-  if (!output_format_)
-  {
-    async_web_server_cpp::HttpReply::stock_reply(async_web_server_cpp::HttpReply::internal_server_error)(request_,
-                                                                                                         connection_,
-                                                                                                         NULL, NULL);
-    throw std::runtime_error("Error looking up output format");
-  }
-  format_context_->oformat = output_format_;
+  output_format_ = format_context_->oformat;
 
   // Set up custom IO callback.
   size_t io_buffer_size = 3 * 1024;    // 3M seen elsewhere and adjudged good
@@ -143,8 +136,8 @@ void LibavStreamer::initialize(const cv::Mat &img)
   io_ctx->seekable = 0;                       // no seeking, it's a stream
   format_context_->pb = io_ctx;
   format_context_->max_interleave_delta = 0;
-  output_format_->flags |= AVFMT_FLAG_CUSTOM_IO;
-  output_format_->flags |= AVFMT_NOFILE;
+  // Indicate we are using custom IO on the context
+  format_context_->flags |= AVFMT_FLAG_CUSTOM_IO;
 
   // Load codec
   if (codec_name_.empty()) // use default codec if none specified
@@ -173,7 +166,9 @@ void LibavStreamer::initialize(const cv::Mat &img)
   #endif
 
   // Set options
+#if ( LIBAVCODEC_VERSION_INT  < AV_VERSION_INT(58,9,100) )
   avcodec_get_context_defaults3(codec_context_, codec_);
+#endif
 
   codec_context_->codec_id = codec_->id;
   codec_context_->bit_rate = bitrate_;
@@ -225,7 +220,7 @@ void LibavStreamer::initialize(const cv::Mat &img)
   frame_->width = output_width_;
   frame_->height = output_height_;
   frame_->format = codec_context_->pix_fmt;
-  output_format_->flags |= AVFMT_NOFILE;
+  // No file used; custom IO is already set on the context
 
   // Generate header
   std::vector<uint8_t> header_buffer;
